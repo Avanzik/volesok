@@ -1,0 +1,29 @@
+name: Update My Configs
+on:
+  schedule:
+    - cron: '0 */1 * * *' # Обновление каждый час
+  workflow_dispatch:      # Кнопка для запуска руками
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Сборка ссылок
+        run: |
+          echo "" > combined.txt
+          while IFS= read -r url || [ -n "$url" ]; do
+            if [[ $url == http* ]]; then
+              curl -sL "$url" >> combined.txt
+              echo "" >> combined.txt
+            fi
+          done < sources.txt
+      - name: Сохранение файла в репозиторий
+        run: |
+          git config --global user.name "Robot"
+          git config --global user.email "bot@github.com"
+          git add combined.txt
+          git commit -m "Hourly update" || exit 0
+          git push
