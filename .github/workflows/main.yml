@@ -1,8 +1,8 @@
 name: Update My Configs
 on:
   schedule:
-    - cron: '*/30 * * * *' # Запуск каждые 30 минут
-  workflow_dispatch: # Кнопка ручного запуска
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
 jobs:
   collect:
     runs-on: ubuntu-latest
@@ -19,36 +19,33 @@ jobs:
         run: |
           touch raw_configs.txt
           
-          echo "1. Собираем ссылки из sources.txt..."
+          echo "1. Собираем ссылки (БЕЗ Shadowsocks)..."
           while IFS= read -r url || [ -n "$url" ]; do
             [[ -z "$url" || "$url" =~ ^# ]] && continue
             CONTENT=$(curl -sL --connect-timeout 5 --max-time 10 "$url" || echo "")
             if [ -z "$CONTENT" ]; then continue; fi
             
-            # Декодируем base64 если нужно
-            if ! echo "$CONTENT" | grep -qE '^(vless|vmess|ss|trojan)://'; then
+            # Декодируем base64 если нужно (убрали ss из проверок)
+            if ! echo "$CONTENT" | grep -qE '^(vless|vmess|trojan)://'; then
               CONTENT=$(echo "$CONTENT" | base64 -d 2>/dev/null || echo "$CONTENT")
             fi
             
-            echo "$CONTENT" | grep -oE '(vless|vmess|ss|trojan)://[^[:space:]"]+' >> raw_configs.txt || true
+            # ВАЖНО: Вытаскиваем ТОЛЬКО vless, vmess и trojan. Shadowsocks идет лесом.
+            echo "$CONTENT" | grep -oE '(vless|vmess|trojan)://[^[:space:]"]+' >> raw_configs.txt || true
           done < sources.txt
           
-          # Убираем дубликаты и короткий мусор
           awk 'length($0) > 15' raw_configs.txt | sort -u > clean_configs.txt
           echo "Собрано уникальных ссылок: $(wc -l < clean_configs.txt)"
           
           echo "2. Запускаем жесткую проверку (Чекер)..."
-          # === НАЧАЛО PYTHON СКРИПТА ДЛЯ ПРОВЕРКИ ===
           cat << 'EOF' > checker.py
           import socket
           import concurrent.futures
           import base64
           import json
-          import re
           import urllib.parse
 
           def get_host_port(link):
-              # Пытаемся достать IP и порт из ссылки
               try:
                   if link.startswith('vmess://'):
                       data = link[8:]
@@ -56,7 +53,6 @@ jobs:
                       j = json.loads(base64.b64decode(data).decode('utf-8'))
                       return j.get('add'), int(j.get('port'))
                   else:
-                      # Для vless, ss, trojan
                       parsed = urllib.parse.urlparse(link)
                       return parsed.hostname, parsed.port
               except:
@@ -66,9 +62,9 @@ jobs:
               host, port = get_host_port(link)
               if not host or not port:
                   return None
-              # Делаем быстрый пинг сервера (таймаут 2 секунды)
+              # Чуть увеличил таймаут, чтобы хорошие сервера успевали ответить
               try:
-                  with socket.create_connection((host, port), timeout=2):
+                  with socket.create_connection((host, port), timeout=3):
                       return link
               except:
                   return None
@@ -78,11 +74,10 @@ jobs:
                   links = f.read().splitlines()
               
               valid_links = []
-              max_links = 500 # НАШ ЛИМИТ
+              max_links = 300 # Снизил лимит до 300, чтобы собирал только самый жир
               
               print(f"Начинаю проверку {len(links)} ссылок...")
               
-              # Запускаем 100 потоков для бешеной скорости
               with concurrent.futures.ThreadPoolExecutor(max_workers=100) as executor:
                   futures = [executor.submit(check_proxy, link) for link in links]
                   
@@ -90,39 +85,34 @@ jobs:
                       res = future.result()
                       if res:
                           valid_links.append(res)
-                          # Если набрали 500 живых - тормозим!
                           if len(valid_links) >= max_links:
-                              print("Набрали 500 рабочих серверов! Останавливаю проверку.")
+                              print("Набрали топ серверов! Тормозим.")
                               for f in futures: f.cancel()
                               break
               
               with open('final_list.txt', 'w') as f:
-                  f.write("#profile-title: Avanzik_Configs\n")
+                  f.write("#profile-title: Avanzik_Configs_Pro\n")
                   f.write("#profile-update-interval: 1\n")
                   f.write("#subscription-userinfo: Avanzik\n")
                   for l in valid_links:
                       f.write(l + '\n')
               
-              print(f"Готово! Сохранено живых серверов: {len(valid_links)}")
+              print(f"Готово! Сохранено: {len(valid_links)}")
 
           if __name__ == "__main__":
               main()
           EOF
-          # === КОНЕЦ PYTHON СКРИПТА ===
 
-          # Запускаем наш чекер
           python3 checker.py
           
-          # Проверяем, создался ли файл
           if [ ! -f final_list.txt ]; then
-            echo "❌ Ни один сервер не выжил! Оставляем старый файл."
+            echo "❌ Ни один сервер не выжил!"
             exit 0
           fi
           
           echo "3. Упаковываем в Base64..."
           base64 -w 76 final_list.txt > combined.txt
           
-          # Убираем временные файлы
           rm raw_configs.txt clean_configs.txt final_list.txt checker.py
           
       - name: Push results
@@ -132,9 +122,9 @@ jobs:
           git add combined.txt
           
           if ! git diff --staged --quiet; then
-            git commit -m "Updated & Checked: $(date '+%Y-%m-%d %H:%M') 🚀"
+            git commit -m "No-SS Update: $(date '+%Y-%m-%d %H:%M') 🛡️"
             git push origin main
-            echo "✅ Файл успешно обновлен на Github!"
+            echo "✅ Файл обновлен!"
           else
-            echo "Нет новых рабочих серверов."
+            echo "Нет изменений."
           fi
