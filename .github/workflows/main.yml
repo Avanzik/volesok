@@ -1,8 +1,9 @@
 name: Update My Configs
 on:
   schedule:
-    - cron: '*/30 * * * *'
-  workflow_dispatch:
+    - cron: '0 */6 * * *' # Запуск каждые 6 часов (00:00, 06:00, 12:00, 18:00)
+  workflow_dispatch:      # Кнопка ручного запуска (если захочешь обновить прямо сейчас)
+
 jobs:
   collect:
     runs-on: ubuntu-latest
@@ -21,22 +22,24 @@ jobs:
           
           while IFS= read -r url || [ -n "$url" ]; do
             [[ -z "$url" || "$url" =~ ^# ]] && continue
-            CONTENT=$(curl -sL --connect-timeout 5 --max-time 10 "$url" || echo "")
+            CONTENT=$(curl -sL --connect-timeout 5 --max-time 15 "$url" || echo "")
             [ -z "$CONTENT" ] && continue
             
-            # Декодируем если надо
+            # Если контент в base64, декодируем. Если нет — берем как есть.
             if ! echo "$CONTENT" | grep -q 'vless://'; then
-              CONTENT=$(echo "$CONTENT" | base64 -d 2>/dev/null || echo "$CONTENT")
+              DECODED=$(echo "$CONTENT" | base64 -d 2>/dev/null || echo "")
+              if [ -n "$DECODED" ]; then CONTENT="$DECODED"; fi
             fi
             
-            # Берем ТОЛЬКО vless
+            # Выдергиваем все vless ссылки
             echo "$CONTENT" | grep -oE 'vless://[^[:space:]"]+' >> raw_configs.txt || true
           done < sources.txt
           
-          # Оставляем только уникальные и длинные ссылки (в Reality они всегда длинные)
+          # Оставляем только уникальные и длинные (Reality/Vision всегда длинные)
           awk 'length($0) > 50' raw_configs.txt | sort -u > clean_configs.txt
+          echo "Собрано для проверки: $(wc -l < clean_configs.txt) ссылок."
 
-          echo "2. Проверка на выживание..."
+          echo "2. Проверка на выживание (Чекер)..."
           cat << 'EOF' > checker.py
           import socket
           import concurrent.futures
@@ -44,13 +47,16 @@ jobs:
 
           def check_proxy(link):
               try:
-                  parsed = urllib.parse.urlparse(link)
+                  # Парсим ссылку, чтобы достать хост и порт
+                  parsed = urllib.parse.urlparse(link.split('#')[0])
                   host = parsed.hostname
                   port = parsed.port if parsed.port else 443
-                  # Пытаемся быстро соединиться
+                  
+                  # Пытаемся быстро соединиться (таймаут 2.5 сек)
                   with socket.create_connection((host, port), timeout=2.5):
-                      # Дополнительная проверка: ищем признаки Reality в ссылке
-                      if "security=reality" in link.lower() or "sni=" in link.lower():
+                      # Фильтр: оставляем только Reality или ссылки с SNI (самые живучие в РФ)
+                      l_low = link.lower()
+                      if "security=reality" in l_low or "sni=" in l_low:
                           return link
                   return None
               except:
@@ -59,24 +65,29 @@ jobs:
           with open('clean_configs.txt', 'r') as f:
               links = f.read().splitlines()
 
+          print(f"Запуск чекера в 100 потоков...")
           valid = []
           with concurrent.futures.ThreadPoolExecutor(max_workers=100) as ex:
               res = list(ex.map(check_proxy, links))
               valid = [r for r in res if r]
 
-          # Берем топ 200 самых свежих
+          # Сохраняем топ-300 живых серверов
           with open('final_list.txt', 'w') as f:
               f.write("#profile-title: Reality_Only_Avanzik\n")
-              for l in valid[:200]:
+              f.write("#profile-update-interval: 6\n")
+              for l in valid[:300]:
                   f.write(l + '\n')
+          
+          print(f"Найдено живых Reality: {len(valid)}")
           EOF
 
           python3 checker.py
           
           if [ -s final_list.txt ]; then
             base64 -w 76 final_list.txt > combined.txt
+            echo "✅ Готово. Записано в combined.txt"
           else
-            echo "Все VLESS сдохли."
+            echo "❌ Все VLESS сдохли или не прошли фильтр Reality."
             exit 0
           fi
           
@@ -85,5 +96,6 @@ jobs:
           git config --global user.name "Avanzik-Bot"
           git config --global user.email "bot@github.com"
           git add combined.txt
-          git commit -m "VLESS Reality Update 🚀" || exit 0
+          # Коммитим только если есть изменения
+          git commit -m "VLESS Reality Update (6h cycle) 🚀" || exit 0
           git push origin main
