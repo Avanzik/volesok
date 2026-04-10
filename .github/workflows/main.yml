@@ -1,76 +1,88 @@
 name: Update My Configs
-
 on:
   schedule:
-    - cron: '0 */1 * * *'      # Запуск каждый час
-  workflow_dispatch:           # Кнопка ручного запуска
-
+    - cron: '*/20 * * * *' # Запуск каждые 20 минут
+  workflow_dispatch: # Кнопка ручного запуска
 jobs:
   collect:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
-
+          
       - name: Process and Filter Configs
         run: |
-          # Создаем временный файл для чистых ссылок
           touch raw_configs.txt
-
-          # Читаем sources.txt и скачиваем контент
-          while read -r url; do
-            [ -z "$url" ] && continue
+          
+          # Читаем sources.txt (построчно)
+          while IFS= read -r url || [ -n "$url" ]; do
+            # Пропускаем пустые строки и комментарии (начинающиеся с #)
+            [[ -z "$url" || "$url" =~ ^# ]] && continue
+            
             echo "Fetching: $url"
             
-            # Скачиваем, пробуем декодировать (если там base64) и фильтруем протоколы
-            CONTENT=$(curl -sL --connect-timeout 10 --max-time 20 "$url")
+            # Скачиваем с жестким таймаутом. Если ошибка - не падаем, просто идем дальше
+            CONTENT=$(curl -sL --connect-timeout 5 --max-time 15 "$url" || echo "")
             
-            # Проверяем, не в base64 ли скачанный контент
-            if [[ ! "$CONTENT" =~ ^(vless|vmess|ss|trojan|tuic|hysteria):// ]]; then
-                DECODED=$(echo "$CONTENT" | base64 -d 2>/dev/null || echo "$CONTENT")
-            else
-                DECODED="$CONTENT"
+            # Если ничего не скачалось, пропускаем
+            if [ -z "$CONTENT" ]; then
+              echo "⚠️ Failed to fetch or empty content from $url"
+              continue
             fi
-
-            echo "$DECODED" | grep -E '^(vless|vmess|ss|trojan|tuic|hysteria)://' >> raw_configs.txt || true
+            
+            # Проверяем, есть ли явные протоколы. Если нет - пробуем декодировать из base64
+            if ! echo "$CONTENT" | grep -qE '^(vless|vmess|ss|trojan|tuic|hysteria|hysteria2|hy2)://'; then
+              CONTENT=$(echo "$CONTENT" | base64 -d 2>/dev/null || echo "$CONTENT")
+            fi
+            
+            # Извлекаем ТОЛЬКО валидные ссылки нужных форматов до первого пробела или кавычки
+            echo "$CONTENT" | grep -oE '(vless|vmess|ss|trojan|tuic|hysteria|hysteria2|hy2)://[^[:space:]"]+' >> raw_configs.txt || true
           done < sources.txt
-
-          # Убираем дубликаты и пустые строки
-          sort -u raw_configs.txt -o raw_configs.txt
-
+          
+          # Очищаем от дубликатов. 
+          # Плюс awk оставляет только строки длиннее 15 символов (отсев мусора).
+          awk 'length($0) > 15' raw_configs.txt | sort -u > clean_configs.txt
+          
+          COUNT=$(wc -l < clean_configs.txt)
+          echo "✅ Total unique valid configs: $COUNT"
+          
+          # Защита от затирания файла, если все источники упали
+          if [ "$COUNT" -eq 0 ]; then
+            echo "❌ No valid configs found! Keeping old file and exiting."
+            exit 0
+          fi
+          
           # Формируем финальный файл с заголовками
-          # Важно: для правильной работы подписки заголовки и ссылки должны быть закодированы ВМЕСТЕ
           {
             echo "#profile-title: Avanzik_Configs"
             echo "#profile-update-interval: 1"
             echo "#subscription-userinfo: Avanzik"
-            cat raw_configs.txt
+            cat clean_configs.txt
           } > final_list.txt
-
+          
           # Кодируем всё в Base64 (одной строкой)
           base64 -w 0 final_list.txt > combined.txt
-          
           echo "Done! Final file size: $(stat -c%s combined.txt) bytes"
-          rm raw_configs.txt final_list.txt
-
+          
+          # Убираем временные файлы
+          rm raw_configs.txt clean_configs.txt final_list.txt
+          
       - name: Push results
         run: |
           git config --global user.name "Avanzik-Bot"
           git config --global user.email "bot@github.com"
-
           git add combined.txt
           
           # Проверяем наличие изменений перед коммитом
           if ! git diff --staged --quiet; then
-            git commit -m "Update configs: $(date '+%Y-%m-%d %H:%M')"
+            git commit -m "Update configs: $(date '+%Y-%m-%d %H:%M') | Total: $COUNT"
             git push origin main
             echo "✅ Combined.txt updated and pushed."
           else
-            echo "No changes detected."
+            echo "No changes detected. Nothing to push."
           fi
