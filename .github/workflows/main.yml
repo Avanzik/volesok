@@ -2,8 +2,8 @@ name: Update My Configs
 
 on:
   schedule:
-    - cron: '0 */1 * * *'      # каждый час
-  workflow_dispatch:           # можно запускать вручную
+    - cron: '0 */1 * * *'      # Запуск каждый час
+  workflow_dispatch:           # Кнопка ручного запуска
 
 jobs:
   collect:
@@ -18,44 +18,59 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
 
-      - name: Clean, Label and Encode
+      - name: Process and Filter Configs
         run: |
-          # Создаём заголовок
-          cat > temp.txt << EOF
-          #profile-title: Avanzik_Configs
-          #profile-update-interval: 1
-          #subscription-userinfo: Avanzik
-          EOF
+          # Создаем временный файл для чистых ссылок
+          touch raw_configs.txt
 
-          # Скачиваем все ссылки из sources.txt и фильтруем только рабочие протоколы
+          # Читаем sources.txt и скачиваем контент
           while read -r url; do
             [ -z "$url" ] && continue
-            echo "Downloading from: $url"
-            curl -sL --connect-timeout 10 --max-time 30 "$url" \
-              | grep -E '^(vless|vmess|ss|trojan|tuic|hysteria)://' >> temp.txt || true
+            echo "Fetching: $url"
+            
+            # Скачиваем, пробуем декодировать (если там base64) и фильтруем протоколы
+            CONTENT=$(curl -sL --connect-timeout 10 --max-time 20 "$url")
+            
+            # Проверяем, не в base64 ли скачанный контент
+            if [[ ! "$CONTENT" =~ ^(vless|vmess|ss|trojan|tuic|hysteria):// ]]; then
+                DECODED=$(echo "$CONTENT" | base64 -d 2>/dev/null || echo "$CONTENT")
+            else
+                DECODED="$CONTENT"
+            fi
+
+            echo "$DECODED" | grep -E '^(vless|vmess|ss|trojan|tuic|hysteria)://' >> raw_configs.txt || true
           done < sources.txt
 
-          # Убираем дубликаты и кодируем в base64 (одной строкой)
-          sort -u temp.txt | base64 -w 0 > combined.txt
-          rm temp.txt
+          # Убираем дубликаты и пустые строки
+          sort -u raw_configs.txt -o raw_configs.txt
 
-          echo "Combined.txt created with $(wc -l < combined.txt) characters"
+          # Формируем финальный файл с заголовками
+          # Важно: для правильной работы подписки заголовки и ссылки должны быть закодированы ВМЕСТЕ
+          {
+            echo "#profile-title: Avanzik_Configs"
+            echo "#profile-update-interval: 1"
+            echo "#subscription-userinfo: Avanzik"
+            cat raw_configs.txt
+          } > final_list.txt
+
+          # Кодируем всё в Base64 (одной строкой)
+          base64 -w 0 final_list.txt > combined.txt
+          
+          echo "Done! Final file size: $(stat -c%s combined.txt) bytes"
+          rm raw_configs.txt final_list.txt
 
       - name: Push results
         run: |
           git config --global user.name "Avanzik-Bot"
           git config --global user.email "bot@github.com"
 
-          # Обновляемся до актуального состояния (важно!)
-          git pull --rebase origin main || true
-
           git add combined.txt
-
-          # Коммитим только если есть изменения
+          
+          # Проверяем наличие изменений перед коммитом
           if ! git diff --staged --quiet; then
-            git commit -m "Update configs by Avanzik-Bot [$(date '+%Y-%m-%d %H:%M')]"
-            git push --force-with-lease origin main
-            echo "✅ Successfully pushed new combined.txt"
+            git commit -m "Update configs: $(date '+%Y-%m-%d %H:%M')"
+            git push origin main
+            echo "✅ Combined.txt updated and pushed."
           else
-            echo "No changes to commit"
+            echo "No changes detected."
           fi
