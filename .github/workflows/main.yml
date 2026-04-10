@@ -1,7 +1,7 @@
 name: Update My Configs
 on:
   schedule:
-    - cron: '*/20 * * * *' # Запуск каждые 20 минут
+    - cron: '*/30 * * * *' # Запуск каждые 30 минут
   workflow_dispatch: # Кнопка ручного запуска
 jobs:
   collect:
@@ -14,7 +14,7 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
-          
+
       - name: Process and Filter Configs
         run: |
           touch raw_configs.txt
@@ -65,8 +65,8 @@ jobs:
             cat clean_configs.txt
           } > final_list.txt
           
-          # Кодируем всё в Base64 (одной строкой)
-          base64 -w 0 final_list.txt > combined.txt
+          # Кодируем всё в Base64 (с разбиением на строки по 76 символов)
+          base64 -w 76 final_list.txt > combined.txt
           echo "Done! Final file size: $(stat -c%s combined.txt) bytes"
           
           # Убираем временные файлы
