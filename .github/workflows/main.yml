@@ -1,8 +1,8 @@
 name: Update My Configs
 on:
   schedule:
-    - cron: '0 */1 * * *' # Обновление каждый час
-  workflow_dispatch:      # Кнопка для запуска руками
+    - cron: '0 */1 * * *'
+  workflow_dispatch:
 
 jobs:
   collect:
@@ -11,29 +11,19 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
-
-      - name: Сборка и очистка ссылок
+      - name: Clean and Collect
         run: |
-          # Создаем временный файл
           touch temp.txt
-          
-          # Читаем ссылки из sources.txt
-          while IFS= read -r url || [ -n "$url" ]; do
-            if [[ $url == http* ]]; then
-              echo "Скачиваю: $url"
-              # Скачиваем, удаляем рекламу (#), удаляем пустые строки
-              curl -sL "$url" | grep -v '^#' | sed '/^$/d' >> temp.txt
-            fi
+          while read -r url; do
+            [ -z "$url" ] && continue
+            curl -sL "$url" | grep -E '^(vless|vmess|ss|trojan|tuic|hysteria)://' >> temp.txt
           done < sources.txt
-
-          # Удаляем дубликаты и сохраняем в итоговый файл
           sort -u temp.txt > combined.txt
-          rm temp.txt
-
-      - name: Сохранение в репозиторий
+      - name: Push
         run: |
-          git config --global user.name "CleanerBot"
+          git config --global user.name "bot"
           git config --global user.email "bot@github.com"
           git add combined.txt
-          git commit -m "Cleaned update: $(date)" || exit 0
+          git commit -m "update" || exit 0
           git push
+          
