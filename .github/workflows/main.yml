@@ -1,0 +1,33 @@
+name: Update My Configs
+on:
+  schedule:
+    - cron: '0 */1 * * *'
+  workflow_dispatch:
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Clean and Collect
+        run: |
+          touch temp.txt
+          while read -r url; do
+            [ -z "$url" ] && continue
+            # Качаем только протоколы, игнорим рекламу и мусор
+            curl -sL "$url" | grep -E '^(vless|vmess|ss|trojan|tuic|hysteria)://' >> temp.txt
+          done < sources.txt
+          sort -u temp.txt > combined.txt
+
+      - name: Push results
+        run: |
+          git config --global user.name "bot"
+          git config --global user.email "bot@github.com"
+          git add combined.txt
+          git commit -m "forced update" || exit 0
+          # Силовой метод, чтобы не было ошибок fetch first
+          git push origin main --force
+          
