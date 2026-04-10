@@ -11,19 +11,29 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
-      - name: Сборка ссылок
+
+      - name: Сборка и очистка ссылок
         run: |
-          echo "" > combined.txt
+          # Создаем временный файл
+          touch temp.txt
+          
+          # Читаем ссылки из sources.txt
           while IFS= read -r url || [ -n "$url" ]; do
             if [[ $url == http* ]]; then
-              curl -sL "$url" >> combined.txt
-              echo "" >> combined.txt
+              echo "Скачиваю: $url"
+              # Скачиваем, удаляем рекламу (#), удаляем пустые строки
+              curl -sL "$url" | grep -v '^#' | sed '/^$/d' >> temp.txt
             fi
           done < sources.txt
-      - name: Сохранение файла в репозиторий
+
+          # Удаляем дубликаты и сохраняем в итоговый файл
+          sort -u temp.txt > combined.txt
+          rm temp.txt
+
+      - name: Сохранение в репозиторий
         run: |
-          git config --global user.name "Robot"
+          git config --global user.name "CleanerBot"
           git config --global user.email "bot@github.com"
           git add combined.txt
-          git commit -m "Hourly update" || exit 0
+          git commit -m "Cleaned update: $(date)" || exit 0
           git push
