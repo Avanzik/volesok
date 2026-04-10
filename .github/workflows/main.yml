@@ -13,118 +13,77 @@ jobs:
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          fetch-depth: 0
 
-      - name: Process, Filter and CHECK Configs
+      - name: Kill Dead Protocols
         run: |
           touch raw_configs.txt
+          echo "1. Собираем только VLESS (Reality/Vision)..."
           
-          echo "1. Собираем ссылки (БЕЗ Shadowsocks)..."
           while IFS= read -r url || [ -n "$url" ]; do
             [[ -z "$url" || "$url" =~ ^# ]] && continue
             CONTENT=$(curl -sL --connect-timeout 5 --max-time 10 "$url" || echo "")
-            if [ -z "$CONTENT" ]; then continue; fi
+            [ -z "$CONTENT" ] && continue
             
-            # Декодируем base64 если нужно (убрали ss из проверок)
-            if ! echo "$CONTENT" | grep -qE '^(vless|vmess|trojan)://'; then
+            # Декодируем если надо
+            if ! echo "$CONTENT" | grep -q 'vless://'; then
               CONTENT=$(echo "$CONTENT" | base64 -d 2>/dev/null || echo "$CONTENT")
             fi
             
-            # ВАЖНО: Вытаскиваем ТОЛЬКО vless, vmess и trojan. Shadowsocks идет лесом.
-            echo "$CONTENT" | grep -oE '(vless|vmess|trojan)://[^[:space:]"]+' >> raw_configs.txt || true
+            # Берем ТОЛЬКО vless
+            echo "$CONTENT" | grep -oE 'vless://[^[:space:]"]+' >> raw_configs.txt || true
           done < sources.txt
           
-          awk 'length($0) > 15' raw_configs.txt | sort -u > clean_configs.txt
-          echo "Собрано уникальных ссылок: $(wc -l < clean_configs.txt)"
-          
-          echo "2. Запускаем жесткую проверку (Чекер)..."
+          # Оставляем только уникальные и длинные ссылки (в Reality они всегда длинные)
+          awk 'length($0) > 50' raw_configs.txt | sort -u > clean_configs.txt
+
+          echo "2. Проверка на выживание..."
           cat << 'EOF' > checker.py
           import socket
           import concurrent.futures
-          import base64
-          import json
           import urllib.parse
 
-          def get_host_port(link):
-              try:
-                  if link.startswith('vmess://'):
-                      data = link[8:]
-                      data += '=' * (4 - len(data) % 4)
-                      j = json.loads(base64.b64decode(data).decode('utf-8'))
-                      return j.get('add'), int(j.get('port'))
-                  else:
-                      parsed = urllib.parse.urlparse(link)
-                      return parsed.hostname, parsed.port
-              except:
-                  return None, None
-
           def check_proxy(link):
-              host, port = get_host_port(link)
-              if not host or not port:
-                  return None
-              # Чуть увеличил таймаут, чтобы хорошие сервера успевали ответить
               try:
-                  with socket.create_connection((host, port), timeout=3):
-                      return link
+                  parsed = urllib.parse.urlparse(link)
+                  host = parsed.hostname
+                  port = parsed.port if parsed.port else 443
+                  # Пытаемся быстро соединиться
+                  with socket.create_connection((host, port), timeout=2.5):
+                      # Дополнительная проверка: ищем признаки Reality в ссылке
+                      if "security=reality" in link.lower() or "sni=" in link.lower():
+                          return link
+                  return None
               except:
                   return None
 
-          def main():
-              with open('clean_configs.txt', 'r') as f:
-                  links = f.read().splitlines()
-              
-              valid_links = []
-              max_links = 300 # Снизил лимит до 300, чтобы собирал только самый жир
-              
-              print(f"Начинаю проверку {len(links)} ссылок...")
-              
-              with concurrent.futures.ThreadPoolExecutor(max_workers=100) as executor:
-                  futures = [executor.submit(check_proxy, link) for link in links]
-                  
-                  for future in concurrent.futures.as_completed(futures):
-                      res = future.result()
-                      if res:
-                          valid_links.append(res)
-                          if len(valid_links) >= max_links:
-                              print("Набрали топ серверов! Тормозим.")
-                              for f in futures: f.cancel()
-                              break
-              
-              with open('final_list.txt', 'w') as f:
-                  f.write("#profile-title: Avanzik_Configs_Pro\n")
-                  f.write("#profile-update-interval: 1\n")
-                  f.write("#subscription-userinfo: Avanzik\n")
-                  for l in valid_links:
-                      f.write(l + '\n')
-              
-              print(f"Готово! Сохранено: {len(valid_links)}")
+          with open('clean_configs.txt', 'r') as f:
+              links = f.read().splitlines()
 
-          if __name__ == "__main__":
-              main()
+          valid = []
+          with concurrent.futures.ThreadPoolExecutor(max_workers=100) as ex:
+              res = list(ex.map(check_proxy, links))
+              valid = [r for r in res if r]
+
+          # Берем топ 200 самых свежих
+          with open('final_list.txt', 'w') as f:
+              f.write("#profile-title: Reality_Only_Avanzik\n")
+              for l in valid[:200]:
+                  f.write(l + '\n')
           EOF
 
           python3 checker.py
           
-          if [ ! -f final_list.txt ]; then
-            echo "❌ Ни один сервер не выжил!"
+          if [ -s final_list.txt ]; then
+            base64 -w 76 final_list.txt > combined.txt
+          else
+            echo "Все VLESS сдохли."
             exit 0
           fi
           
-          echo "3. Упаковываем в Base64..."
-          base64 -w 76 final_list.txt > combined.txt
-          
-          rm raw_configs.txt clean_configs.txt final_list.txt checker.py
-          
-      - name: Push results
+      - name: Push
         run: |
           git config --global user.name "Avanzik-Bot"
           git config --global user.email "bot@github.com"
           git add combined.txt
-          
-          if ! git diff --staged --quiet; then
-            git commit -m "No-SS Update: $(date '+%Y-%m-%d %H:%M') 🛡️"
-            git push origin main
-            echo "✅ Файл обновлен!"
-          else
-            echo "Нет изменений."
-          fi
+          git commit -m "VLESS Reality Update 🚀" || exit 0
+          git push origin main
