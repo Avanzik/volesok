@@ -1,8 +1,8 @@
 name: Update My Configs
 on:
   schedule:
-    - cron: '0 */6 * * *' # Запуск каждые 6 часов (00:00, 06:00, 12:00, 18:00)
-  workflow_dispatch:      # Кнопка ручного запуска (если захочешь обновить прямо сейчас)
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
 
 jobs:
   collect:
@@ -15,70 +15,75 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Kill Dead Protocols
+      - name: Collect and Ping All Protocols
         run: |
           touch raw_configs.txt
-          echo "1. Собираем только VLESS (Reality/Vision)..."
+          echo "1. Собираем все типы протоколов (VLESS, VMess, Trojan, Shadowsocks)..."
           
           while IFS= read -r url || [ -n "$url" ]; do
             [[ -z "$url" || "$url" =~ ^# ]] && continue
             CONTENT=$(curl -sL --connect-timeout 5 --max-time 15 "$url" || echo "")
             [ -z "$CONTENT" ] && continue
             
-            # Если контент в base64, декодируем. Если нет — берем как есть.
-            if ! echo "$CONTENT" | grep -q 'vless://'; then
+            if ! echo "$CONTENT" | grep -qE '(vless|vmess|trojan|ss)://'; then
               DECODED=$(echo "$CONTENT" | base64 -d 2>/dev/null || echo "")
-              if [ -n "$DECODED" ]; then CONTENT="$DECODED"; fi
+              [ -n "$DECODED" ] && CONTENT="$DECODED"
             fi
             
-            # Выдергиваем все vless ссылки
-            echo "$CONTENT" | grep -oE 'vless://[^[:space:]"]+' >> raw_configs.txt || true
+            # Выдергиваем ссылки разных протоколов
+            echo "$CONTENT" | grep -oE '(vless|vmess|trojan|ss)://[^[:space:]"]+' >> raw_configs.txt || true
           done < sources.txt
           
-          # Оставляем только уникальные и длинные (Reality/Vision всегда длинные)
-          awk 'length($0) > 50' raw_configs.txt | sort -u > clean_configs.txt
+          awk 'length($0) > 20' raw_configs.txt | sort -u > clean_configs.txt
           echo "Собрано для проверки: $(wc -l < clean_configs.txt) ссылок."
 
-          echo "2. Проверка на выживание (Чекер)..."
+          echo "2. Универсальный пинг-чекер..."
           cat << 'EOF' > checker.py
-          import socket
           import concurrent.futures
+          import socket
+          import time
           import urllib.parse
 
           def check_proxy(link):
               try:
-                  # Парсим ссылку, чтобы достать хост и порт
-                  parsed = urllib.parse.urlparse(link.split('#')[0])
+                  parsed = urllib.parse.urlparse(link)
                   host = parsed.hostname
-                  port = parsed.port if parsed.port else 443
+                  port = parsed.port
                   
-                  # Пытаемся быстро соединиться (таймаут 2.5 сек)
-                  with socket.create_connection((host, port), timeout=2.5):
-                      # Фильтр: оставляем только Reality или ссылки с SNI (самые живучие в РФ)
-                      l_low = link.lower()
-                      if "security=reality" in l_low or "sni=" in l_low:
-                          return link
-                  return None
+                  if not host or not port:
+                      return None, 9999
+
+                  # Замеряем реальный TCP-пинг (время отклика сокета)
+                  start_time = time.time()
+                  with socket.create_connection((host, port), timeout=3.0):
+                      latency = int((time.time() - start_time) * 1000)
+                      return link, latency
               except:
-                  return None
+                  return None, 9999
 
           with open('clean_configs.txt', 'r') as f:
-              links = f.read().splitlines()
+              links = [line.strip() for line in f if line.strip()]
 
-          print(f"Запуск чекера в 100 потоков...")
+          print(f"Пингуем {len(links)} серверов...")
           valid = []
-          with concurrent.futures.ThreadPoolExecutor(max_workers=100) as ex:
-              res = list(ex.map(check_proxy, links))
-              valid = [r for r in res if r]
+          
+          with concurrent.futures.ThreadPoolExecutor(max_workers=60) as ex:
+              results = ex.map(check_proxy, links)
+              for link, latency in results:
+                  if link and latency < 350:  # отсеиваем те, где пинг больше 350мс
+                      valid.append((link, latency))
 
-          # Сохраняем топ-300 живых серверов
+          # Сортируем по самому быстрому пингу (как в клиенте на скрине)
+          valid.sort(key=lambda x: x[1])
+
+          # Сохраняем топ-300 самых быстрых
           with open('final_list.txt', 'w') as f:
-              f.write("#profile-title: Reality_Only_Avanzik\n")
+              f.write("#profile-title: Fast_All_Protocols_Avanzik\n")
               f.write("#profile-update-interval: 6\n")
-              for l in valid[:300]:
+              for l, lat in valid[:300]:
                   f.write(l + '\n')
           
-          print(f"Найдено живых Reality: {len(valid)}")
+          print(f"Найдено живых и быстрых серверов: {len(valid)}")
           EOF
 
           python3 checker.py
@@ -87,7 +92,7 @@ jobs:
             base64 -w 76 final_list.txt > combined.txt
             echo "✅ Готово. Записано в combined.txt"
           else
-            echo "❌ Все VLESS сдохли или не прошли фильтр Reality."
+            echo "❌ Рабочих серверов не найдено."
             exit 0
           fi
           
@@ -96,6 +101,5 @@ jobs:
           git config --global user.name "Avanzik-Bot"
           git config --global user.email "bot@github.com"
           git add combined.txt
-          # Коммитим только если есть изменения
-          git commit -m "VLESS Reality Update (6h cycle) 🚀" || exit 0
+          git commit -m "Multi-protocol Ping Sort Update 🚀" || exit 0
           git push origin main
