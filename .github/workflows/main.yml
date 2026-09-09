@@ -1,4 +1,5 @@
 name: Update My Configs
+
 on:
   schedule:
     - cron: '0 */6 * * *'
@@ -15,91 +16,51 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Collect and Ping All Protocols
+      - name: Fetch and Clean Configs
         run: |
           touch raw_configs.txt
-          echo "1. Собираем все типы протоколов (VLESS, VMess, Trojan, Shadowsocks)..."
+          echo "📥 Скачиваем конфиги из источников..."
           
           while IFS= read -r url || [ -n "$url" ]; do
             [[ -z "$url" || "$url" =~ ^# ]] && continue
-            CONTENT=$(curl -sL --connect-timeout 5 --max-time 15 "$url" || echo "")
+            echo "Обработка: $url"
+            
+            # Скачиваем файл по ссылке
+            CONTENT=$(curl -sL --connect-timeout 10 --max-time 20 "$url" || echo "")
             [ -z "$CONTENT" ] && continue
             
-            if ! echo "$CONTENT" | grep -qE '(vless|vmess|trojan|ss)://'; then
+            # Проверяем, закодирован ли файл в base64, и если да — декодируем
+            # (Проверяем отсутствие стандартных префиксов в начале текста)
+            if ! echo "$CONTENT" | grep -qE '^(vless://|vmess://|trojan://|ss://|hysteria2://|tuic://)'; then
               DECODED=$(echo "$CONTENT" | base64 -d 2>/dev/null || echo "")
-              [ -n "$DECODED" ] && CONTENT="$DECODED"
+              if [ -n "$DECODED" ]; then
+                CONTENT="$DECODED"
+              fi
             fi
             
-            # Выдергиваем ссылки разных протоколов
-            echo "$CONTENT" | grep -oE '(vless|vmess|trojan|ss)://[^[:space:]"]+' >> raw_configs.txt || true
+            # Добавляем в общий файл всё, что похоже на конфигурации прокси
+            echo "$CONTENT" | grep -E '^(vless://|vmess://|trojan://|ss://|hysteria2://|tuic://)' >> raw_configs.txt || true
           done < sources.txt
           
-          awk 'length($0) > 20' raw_configs.txt | sort -u > clean_configs.txt
-          echo "Собрано для проверки: $(wc -l < clean_configs.txt) ссылок."
-
-          echo "2. Универсальный пинг-чекер..."
-          cat << 'EOF' > checker.py
-          import concurrent.futures
-          import socket
-          import time
-          import urllib.parse
-
-          def check_proxy(link):
-              try:
-                  parsed = urllib.parse.urlparse(link)
-                  host = parsed.hostname
-                  port = parsed.port
-                  
-                  if not host or not port:
-                      return None, 9999
-
-                  # Замеряем реальный TCP-пинг (время отклика сокета)
-                  start_time = time.time()
-                  with socket.create_connection((host, port), timeout=3.0):
-                      latency = int((time.time() - start_time) * 1000)
-                      return link, latency
-              except:
-                  return None, 9999
-
-          with open('clean_configs.txt', 'r') as f:
-              links = [line.strip() for line in f if line.strip()]
-
-          print(f"Пингуем {len(links)} серверов...")
-          valid = []
+          # Убираем дубликаты и пустые строки, оставляя полные конфиги со всеми хвостами
+          awk 'NF' raw_configs.txt | sort -u > clean_configs.txt
           
-          with concurrent.futures.ThreadPoolExecutor(max_workers=60) as ex:
-              results = ex.map(check_proxy, links)
-              for link, latency in results:
-                  if link and latency < 350:  # отсеиваем те, где пинг больше 350мс
-                      valid.append((link, latency))
+          TOTAL_COUNT=$(wc -l < clean_configs.txt)
+          echo "✅ Найдено уникальных конфигов: $TOTAL_COUNT"
 
-          # Сортируем по самому быстрому пингу (как в клиенте на скрине)
-          valid.sort(key=lambda x: x[1])
-
-          # Сохраняем топ-300 самых быстрых
-          with open('final_list.txt', 'w') as f:
-              f.write("#profile-title: Fast_All_Protocols_Avanzik\n")
-              f.write("#profile-update-interval: 6\n")
-              for l, lat in valid[:300]:
-                  f.write(l + '\n')
-          
-          print(f"Найдено живых и быстрых серверов: {len(valid)}")
-          EOF
-
-          python3 checker.py
-          
-          if [ -s final_list.txt ]; then
-            base64 -w 76 final_list.txt > combined.txt
-            echo "✅ Готово. Записано в combined.txt"
+          if [ "$TOTAL_COUNT" -gt 0 ]; then
+            # Запаковываем итоговый файл в base64 для клиента/бота
+            base64 -w 76 clean_configs.txt > combined.txt
+            echo "🚀 Файл combined.txt успешно обновлен!"
           else
-            echo "❌ Рабочих серверов не найдено."
-            exit 0
+            echo "❌ Ошибка: не удалось собрать ни одного конфига."
+            exit 1
           fi
-          
-      - name: Push
+
+      - name: Push updates
         run: |
           git config --global user.name "Avanzik-Bot"
           git config --global user.email "bot@github.com"
           git add combined.txt
-          git commit -m "Multi-protocol Ping Sort Update 🚀" || exit 0
+          git commit -m "Update working configs without trimming 🚀" || exit 0
           git push origin main
